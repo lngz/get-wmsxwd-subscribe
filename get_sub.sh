@@ -169,6 +169,53 @@ download_config() {
   return 1
 }
 
+# 为 OpenAI/ChatGPT 单独使用不包含香港节点的测速组。订阅更新后会重建
+# config.yaml，因此在每次下载成功后执行，避免手工改动被覆盖。
+apply_openai_non_hk_policy() {
+  local temp_file
+  local non_hk_proxies
+
+  temp_file="$(mktemp)"
+  non_hk_proxies="$(awk '
+    /^proxies:/ { in_proxies=1; next }
+    /^proxy-groups:/ { in_proxies=0 }
+    in_proxies && /^    - \{ name: / {
+      name=$0
+      sub(/^    - \{ name: /, "", name)
+      sub(/,.*/, "", name)
+      if (name !~ /香港/) {
+        printf "%s%s", separator, name
+        separator=", "
+      }
+    }
+  ' "$CONFIG_FILE")"
+
+  if [ -z "$non_hk_proxies" ]; then
+    printf '未能从订阅中提取非香港节点，跳过 OpenAI 规则处理。\n' >&2
+    rm -f "$temp_file"
+    return 1
+  fi
+
+  awk -v proxies="$non_hk_proxies" '
+    # 可重复执行：先删除旧的自定义组，再在 proxy-groups 后插入新组。
+    /name: '\''🤖 OpenAI 非港自动'\''/ { next }
+    /^proxy-groups:/ {
+      print
+      print "    - { name: '\''🤖 OpenAI 非港自动'\'', type: url-test, proxies: [" proxies "], url: '\''http://www.gstatic.com/generate_204'\'', interval: 86400 }"
+      next
+    }
+    {
+      if ($0 ~ /(openai\.com|chatgpt\.com|oaistatic\.com|oaiusercontent\.com|openaiapi-site\.azureedge\.net)/) {
+        gsub(/,🚀 节点选择'\''/, ",🤖 OpenAI 非港自动'\''")
+      }
+      print
+    }
+  ' "$CONFIG_FILE" >"$temp_file"
+
+  mv "$temp_file" "$CONFIG_FILE"
+  printf '已为 OpenAI/ChatGPT 配置非香港自动选择组。\n'
+}
+
 main() {
   local email
   local password
@@ -190,7 +237,13 @@ main() {
   printf '成功获得订阅链接: %s\n' "$sub_url"
   printf '%s\n' '------------------------------'
 
-  download_config "$sub_url"
+  download_config "$sub_url" || return 1
+  apply_openai_non_hk_policy
 }
+
+if [ "${1:-}" = "--apply-openai-policy" ]; then
+  apply_openai_non_hk_policy
+  exit 0
+fi
 
 main "$@"
